@@ -1,0 +1,127 @@
+---
+- name: Install requirements packeges
+  apt:
+    update_cache: yes
+    name:
+      - mariadb-server
+      - mariadb-client
+      - apache2
+      - libapache2-mod-php
+      - php-xml
+      - php-ldap
+      - php-mbstring
+      - php-gd
+      - php-gmp
+      - php-mysql
+      - snmp
+      - php-snmp
+      - rrdtool
+      - librrds-perl
+      - python-mysqldb
+      - sudo
+- name: Update timezone in php.ini config
+  lineinfile:
+    path: "{{ item.path }}"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+    - {path: "/etc/php/7.3/apache2/php.ini", regexp: "^date.timezone =", line: "date.timezone = US/Central"}
+    - {path: "/etc/php/7.3/apache2/php.ini", regexp: "^memory_limit =", line: "memory_limit = 512M"}
+    - {path: "/etc/php/7.3/apache2/php.ini", regexp: "^max_execution_time =", line: "max_execution_time = 60"}
+    - {path: "/etc/php/7.3/cli/php.ini", regexp: "^date.timezone =", line: "date.timezone = US/Central"}
+    - {path: "/etc/php/7.3/cli/php.ini", regexp: "^memory_limit =", line: "memory_limit = 512M"}
+    - {path: "/etc/php/7.3/cli/php.ini", regexp: "^max_execution_time =", line: "max_execution_time = 60"}
+- name: Update mysql config
+  template:
+    src: "50-server.cnf.j2"
+    dest: "/etc/mysql/mariadb.conf.d/50-server.cnf"
+- name: UP mysql and apache2
+  systemd:
+    name: "{{ item.name }}"
+    state: restarted
+    enabled: yes
+  loop:
+    - {name: "mariadb"}
+    - {name: "apache2"}
+- name: Copy user grant template on cacti database
+  template:
+    src: "user_grant.sql.j2"
+    dest: "{{ tmp_dir }}/user_grant.sql"
+- name: Copy user grant template on timezone
+  template:
+    src: "timezone_grant.sql.j2"
+    dest: "{{ tmp_dir }}/timezone_grant.sql"
+- name: Create cacti database
+  community.mysql.mysql_db:
+    name: "{{ mysql.database }}"
+    state: present
+- name: Grant privileges on database
+  community.mysql.mysql_db:
+    state: import
+    name: "{{ mysql.database }}"
+    target: "{{ tmp_dir }}/user_grant.sql"
+- name: Import mysql test data timezone
+  community.mysql.mysql_db:
+    state: import
+    name: mysql
+    target: /usr/share/mysql/mysql_test_data_timezone.sql
+  ignore_errors: yes
+- name: Grant to cacti user on timezone
+  community.mysql.mysql_db:
+    state: import
+    name: mysql
+    target: "{{ tmp_dir }}/timezone_grant.sql"
+- name: Import cacti.sql
+  community.mysql.mysql_db:
+    state: import
+    name: "{{ mysql.database }}"
+    target: "{{ cacti.work_dir }}/{{ cacti.sql }}"
+  ignore_errors: yes
+- name: Get cacti archive
+  get_url:
+    url: "{{ cacti.url }}" 
+    dest: "{{ tmp_dir }}/{{ cacti.name }}"
+- name: Create cacti work dir
+  file:
+    path: "{{ cacti.work_dir }}"
+    state: directory
+    owner: www-data
+    group: www-data
+- name: Unarchive cacti
+  unarchive:
+    src: "{{ tmp_dir }}/{{ cacti.name }}"
+    dest: "{{ cacti.work_dir }}"
+    extra_opts:
+    - --strip-components=1
+    remote_src: yes
+    owner: www-data
+    group: www-data
+- name: Create cacti log file
+  file:
+    path: "{{ cacti.log }}"
+    state: touch
+    mode: '0666'
+- name: Set config value for cacti
+  lineinfile:
+    path: "{{ cacti.config }}"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+    - {regexp: "^\\$database_default  =", line: "$database_default = '{{ mysql.database }}';"}
+    - {regexp: "^\\$database_username =", line: "$database_username = '{{ mysql.user }}';"}
+    - {regexp: "^\\$database_password =", line: "$database_password = '{{ mysql.user_password }}';"}
+- name: Set cacti crontjob
+  cron:
+    name: "cacti poll metrics"
+    minute: "*/5"
+    job: "sudo -u www-data php {{ cacti.work_dir }}/poller.php > /dev/null 2>&1"
+- name: Copy apache2 cacti tempate
+  template:
+    src: "cacti.conf.j2"
+    dest: "/etc/apache2/sites-available/cacti.conf"
+- name: UP apache cacti config
+  shell: a2ensite cacti
+- name: Restarted apache
+  systemd:
+    name: "apache2"
+    state: restarted

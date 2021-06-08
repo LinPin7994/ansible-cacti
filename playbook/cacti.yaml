@@ -1,0 +1,5 @@
+- name: Install cacti
+  hosts: cacti
+  become: yes
+  roles:
+   - cacti
